@@ -39,6 +39,15 @@ def test_input_validation(data, message):
         triangle.triangulate(data, "p")
 
 
+def test_segment_through_vertex_is_rejected():
+    data = {
+        "vertices": [[0, 0], [2, 0], [1, 0], [1, 1]],
+        "segments": [[0, 1], [1, 3], [3, 0]],
+    }
+    with pytest.raises(ValueError, match="passes through"):
+        triangle.triangulate(data, "p")
+
+
 @pytest.mark.parametrize(
     "field,value,error",
     [

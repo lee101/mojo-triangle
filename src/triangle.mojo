@@ -116,6 +116,7 @@ def mark_cavity(
     midx: Float64,
     midy: Float64,
     circle_eps: Float64,
+    generation: Float64,
 ) -> Int:
     comptime W = simd_width_of[DType.float64]()
     var dx = points[2 * vertex] - midx
@@ -132,10 +133,10 @@ def mark_cavity(
             constant + linear_x * dx + linear_y * dy - orientation * squared
         )
         var mask = values.gt(circle_eps)
-        marks.store(t, mask.cast[DType.float64]())
         if mask.reduce_or():
             for lane in range(W):
                 if mask[lane]:
+                    marks[t + lane] = generation
                     bad_triangles[nbad] = t + lane
                     nbad += 1
         t += W
@@ -147,11 +148,9 @@ def mark_cavity(
             - coefficients[t] * squared
         )
         if value > circle_eps:
-            marks[t] = 1.0
+            marks[t] = generation
             bad_triangles[nbad] = t
             nbad += 1
-        else:
-            marks[t] = 0.0
         t += 1
     return nbad
 
@@ -164,13 +163,14 @@ def remove_cavity(
     nbad: Int,
     coefficients: FPtr,
     capacity: Int,
+    generation: Float64,
 ) -> Int:
     var last = nt - 1
     for i in range(nbad):
         var t = Int(bad_triangles[i])
         if t > last:
             break
-        while last > t and marks[last] != 0.0:
+        while last > t and marks[last] == generation:
             last -= 1
         if last == t:
             last -= 1
@@ -238,10 +238,22 @@ def build_adjacency(
     hash_values: IPtr,
     hash_size: Int,
 ):
-    for i in range(3 * nt):
+    comptime W = simd_width_of[DType.int]()
+    var negative_ones = SIMD[DType.int, W](-1)
+    var i = 0
+    while i + W <= 3 * nt:
+        neighbors.store(i, negative_ones)
+        i += W
+    while i < 3 * nt:
         neighbors[i] = -1
-    for i in range(hash_size):
+        i += 1
+    i = 0
+    while i + W <= hash_size:
+        hash_keys.store(i, negative_ones)
+        i += W
+    while i < hash_size:
         hash_keys[i] = -1
+        i += 1
     for t in range(nt):
         for e in range(3):
             var a = Int(triangles[3 * t + e])
@@ -263,12 +275,45 @@ def build_adjacency(
                 neighbors[3 * other + other_edge] = t
 
 
-def is_constraint(segments: IPtr, m: Int, a: Int, b: Int) -> Bool:
+def build_constraint_hash(
+    segments: IPtr,
+    m: Int,
+    n: Int,
+    hash_keys: IPtr,
+    hash_size: Int,
+):
+    comptime W = simd_width_of[DType.int]()
+    var negative_ones = SIMD[DType.int, W](-1)
+    var i = 0
+    while i + W <= hash_size:
+        hash_keys.store(i, negative_ones)
+        i += W
+    while i < hash_size:
+        hash_keys[i] = -1
+        i += 1
     for s in range(m):
-        var u = Int(segments[2 * s])
-        var v = Int(segments[2 * s + 1])
-        if (u == a and v == b) or (u == b and v == a):
+        var a = Int(segments[2 * s])
+        var b = Int(segments[2 * s + 1])
+        var key = min(a, b) * (n + 1) + max(a, b)
+        var slot = key % hash_size
+        while hash_keys[slot] >= 0 and hash_keys[slot] != key:
+            slot = (slot + 1) % hash_size
+        hash_keys[slot] = key
+
+
+def is_constraint(
+    hash_keys: IPtr,
+    hash_size: Int,
+    n: Int,
+    a: Int,
+    b: Int,
+) -> Bool:
+    var key = min(a, b) * (n + 1) + max(a, b)
+    var slot = key % hash_size
+    while hash_keys[slot] >= 0:
+        if hash_keys[slot] == key:
             return True
+        slot = (slot + 1) % hash_size
     return False
 
 
@@ -410,6 +455,8 @@ def legalize(
     n: Int,
     segments: IPtr,
     m: Int,
+    constraint_keys: IPtr,
+    constraint_hash_size: Int,
     triangles: IPtr,
     neighbors: IPtr,
     nt: Int,
@@ -428,7 +475,9 @@ def legalize(
             for e in range(3):
                 var a = Int(triangles[3 * t + e])
                 var b = Int(triangles[3 * t + (e + 1) % 3])
-                if is_constraint(segments, m, a, b):
+                if is_constraint(
+                    constraint_keys, constraint_hash_size, n, a, b
+                ):
                     continue
                 var other = Int(neighbors[3 * t + e])
                 if other <= t:
@@ -456,28 +505,36 @@ def legalize(
 
 
 def mark_connected(
-    segments: IPtr,
-    m: Int,
+    n: Int,
+    constraint_keys: IPtr,
+    constraint_hash_size: Int,
     triangles: IPtr,
     neighbors: IPtr,
     nt: Int,
     marks: FPtr,
+    queue: IPtr,
 ):
-    var changed = True
-    while changed:
-        changed = False
-        for t in range(nt):
-            if marks[t] == 0.0:
+    var head = 0
+    var tail = 0
+    for t in range(nt):
+        if marks[t] != 0.0:
+            queue[tail] = t
+            tail += 1
+    while head < tail:
+        var t = Int(queue[head])
+        head += 1
+        for e in range(3):
+            var a = Int(triangles[3 * t + e])
+            var b = Int(triangles[3 * t + (e + 1) % 3])
+            if is_constraint(
+                constraint_keys, constraint_hash_size, n, a, b
+            ):
                 continue
-            for e in range(3):
-                var a = Int(triangles[3 * t + e])
-                var b = Int(triangles[3 * t + (e + 1) % 3])
-                if is_constraint(segments, m, a, b):
-                    continue
-                var other = Int(neighbors[3 * t + e])
-                if other >= 0 and marks[other] == 0.0:
-                    marks[other] = 1.0
-                    changed = True
+            var other = Int(neighbors[3 * t + e])
+            if other >= 0 and marks[other] == 0.0:
+                marks[other] = 1.0
+                queue[tail] = other
+                tail += 1
 
 
 def filter_domain(
@@ -491,23 +548,38 @@ def filter_domain(
     neighbors: IPtr,
     nt: Int,
     marks: FPtr,
+    constraint_keys: IPtr,
+    constraint_hash_size: Int,
+    queue: IPtr,
     midx: Float64,
     midy: Float64,
     span: Float64,
     eps: Float64,
 ) -> Int:
-    for t in range(nt):
+    comptime W = simd_width_of[DType.float64]()
+    var zeros = SIMD[DType.float64, W](0.0)
+    var t = 0
+    while t + W <= nt:
+        marks.store(t, zeros)
+        t += W
+    while t < nt:
         marks[t] = 0.0
+        t += 1
     for t in range(nt):
         for e in range(3):
             var a = Int(triangles[3 * t + e])
             var b = Int(triangles[3 * t + (e + 1) % 3])
             if (
                 neighbors[3 * t + e] < 0
-                and not is_constraint(segments, m, a, b)
+                and not is_constraint(
+                    constraint_keys, constraint_hash_size, n, a, b
+                )
             ):
                 marks[t] = 1.0
-    mark_connected(segments, m, triangles, neighbors, nt, marks)
+    mark_connected(
+        n, constraint_keys, constraint_hash_size,
+        triangles, neighbors, nt, marks, queue,
+    )
     for h in range(nholes):
         var hx = holes[2 * h]
         var hy = holes[2 * h + 1]
@@ -536,7 +608,10 @@ def filter_domain(
             if ab >= -eps and bc >= -eps and ca >= -eps:
                 marks[t] = 1.0
                 break
-    mark_connected(segments, m, triangles, neighbors, nt, marks)
+    mark_connected(
+        n, constraint_keys, constraint_hash_size,
+        triangles, neighbors, nt, marks, queue,
+    )
     var kept = 0
     for t in range(nt):
         if marks[t] == 0.0:
@@ -585,6 +660,15 @@ def triangulate_kernel(
     triangles[0] = n
     triangles[1] = n + 1
     triangles[2] = n + 2
+    comptime W = simd_width_of[DType.float64]()
+    var zeros = SIMD[DType.float64, W](0.0)
+    var scratch_i = 0
+    while scratch_i + W <= capacity:
+        marks.store(scratch_i, zeros)
+        scratch_i += W
+    while scratch_i < capacity:
+        marks[scratch_i] = 0.0
+        scratch_i += 1
     set_circle_coefficients(
         points, n, triangles, 0, coefficients, capacity, midx, midy, span
     )
@@ -592,7 +676,7 @@ def triangulate_kernel(
     for vertex in range(n):
         var nbad = mark_cavity(
             points, vertex, marks, edge_b + capacity, nt, coefficients, capacity,
-            midx, midy, circle_eps,
+            midx, midy, circle_eps, Float64(vertex + 1),
         )
         var ne = 0
         for bad in range(nbad):
@@ -619,7 +703,7 @@ def triangulate_kernel(
                     ne += 1
         nt = remove_cavity(
             triangles, marks, nt, edge_b + capacity, nbad,
-            coefficients, capacity,
+            coefficients, capacity, Float64(vertex + 1),
         )
         for e in range(ne):
             if edge_a[e] < 0:
@@ -657,14 +741,16 @@ def triangulate_kernel(
             midx, midy, span, cross_eps,
         ):
             return -3
+        build_constraint_hash(segments, m, n, edge_a, 3 * capacity)
         legalize(
-            points, n, segments, m, triangles, neighbors, nt, midx, midy, span,
-            cross_eps, circle_eps,
+            points, n, segments, m, edge_a, 3 * capacity,
+            triangles, neighbors, nt, midx, midy, span, cross_eps, circle_eps,
         )
     if clip:
         nt = filter_domain(
             points, n, segments, m, holes, nholes,
             triangles, neighbors, nt, marks,
+            edge_a, 3 * capacity, edge_b,
             midx, midy, span, eps,
         )
     return nt

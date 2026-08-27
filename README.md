@@ -89,19 +89,21 @@ Linux 6.8.0-136-generic x86-64, using the best of five warm runs. A ratio below
 
 | case | mojo-triangle | upstream triangle | upstream / Mojo |
 |---|---:|---:|---:|
-| delaunay, 250 points | 0.398 ms | 0.296 ms | 0.744x |
-| delaunay, 1,000 points | 3.446 ms | 0.792 ms | 0.230x |
-| delaunay, 3,000 points | 14.195 ms | 2.473 ms | 0.174x |
-| constrained polygon, 250 points | 2.029 ms | 0.368 ms | 0.181x |
-| constrained polygon, 1,000 points | 9.181 ms | 1.367 ms | 0.149x |
+| delaunay, 250 points | 0.315 ms | 0.200 ms | 0.635x |
+| delaunay, 1,000 points | 1.384 ms | 0.774 ms | 0.559x |
+| delaunay, 3,000 points | 6.843 ms | 2.237 ms | 0.327x |
+| constrained polygon, 250 points | 0.887 ms | 0.211 ms | 0.238x |
+| constrained polygon, 1,000 points | 3.830 ms | 0.790 ms | 0.206x |
 
 Upstream remains faster in every measured case. The Mojo cavity predicate now
 uses translation-stable cached coefficients scanned at the native Float64 SIMD
-width, with an explicit scalar tail. Cavity removal touches only matched
-triangles, unconstrained meshes skip redundant post-construction legalization,
-and constrained meshes use a scratch-buffer edge hash with adjacency links
-maintained across flips. PSLG validation and edge extraction are batched NumPy
-operations instead of Python scalar geometry loops.
+width, with an explicit scalar tail. Generation tags avoid clearing the full
+cavity-mark array on every point insertion. Large scratch fills are SIMD-width
+stores with scalar tails, and cavity removal touches only matched triangles.
+Constrained-edge membership uses a scratch-buffer hash, adjacency links are
+maintained across flips, and domain removal is a queue flood instead of repeated
+full-mesh scans. NumPy duplicate checks use lexicographic ordering, and one
+caller-owned workspace supplies all native scratch buffers without FFI copies.
 
 No threaded CPU path is enabled. Point insertions mutate the mesh sequentially,
 and the independent scan inside each insertion is too short at these sizes to

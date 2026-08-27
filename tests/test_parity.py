@@ -39,8 +39,9 @@ def test_delaunay_matches_upstream_on_general_position_points(n):
     assert ours.dtype == np.int32
 
 
-def test_delaunay_simd_tail_matches_upstream():
-    vertices = np.random.default_rng(37).normal(size=(37, 2))
+@pytest.mark.parametrize("n", [3, 5, 9, 17, 37])
+def test_delaunay_simd_tail_matches_upstream(n):
+    vertices = np.random.default_rng(n).normal(size=(n, 2))
     assert triangle_set(triangle.delaunay(vertices)) == triangle_set(
         upstream.delaunay(vertices)
     )

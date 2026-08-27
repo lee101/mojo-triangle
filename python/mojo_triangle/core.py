@@ -10,6 +10,10 @@ from ._lib import addr, lib
 
 _PASSIVE_OPTIONS = frozenset("pce nzQXCiFl".replace(" ", ""))
 _UNSUPPORTED_OPTIONS = frozenset("rqaDsSv")
+_EMPTY_SEGMENTS = np.empty((0, 2), dtype=np.int64)
+_EMPTY_HOLES = np.empty((0, 2), dtype=np.float64)
+_SEGMENT_SENTINEL = np.empty((1, 2), dtype=np.int64)
+_HOLE_SENTINEL = np.empty((1, 2), dtype=np.float64)
 
 
 def _integers(value, dtype: np.dtype, name: str) -> np.ndarray:
@@ -50,15 +54,18 @@ def _points(value, name: str = "vertices") -> np.ndarray:
         raise ValueError(f"{name} must have shape (n, 2)")
     if not np.isfinite(points).all():
         raise ValueError(f"{name} must contain only finite coordinates")
-    if len(np.unique(points, axis=0)) != len(points):
-        raise ValueError("duplicate vertices are not supported")
+    if len(points) > 1:
+        order = np.lexsort((points[:, 1], points[:, 0]))
+        ordered = points[order]
+        if np.any(np.all(ordered[1:] == ordered[:-1], axis=1)):
+            raise ValueError("duplicate vertices are not supported")
     return points
 
 
 def _segments(value, n: int) -> np.ndarray:
     segments = _integers(value, np.dtype(np.int64), "segments")
     if segments.size == 0:
-        return np.empty((0, 2), dtype=np.int64)
+        return _EMPTY_SEGMENTS
     if segments.ndim != 2 or segments.shape[1] != 2:
         raise ValueError("segments must have shape (m, 2)")
     if np.any(segments < 0) or np.any(segments >= n):
@@ -66,7 +73,11 @@ def _segments(value, n: int) -> np.ndarray:
     if np.any(segments[:, 0] == segments[:, 1]):
         raise ValueError("segments must have distinct endpoints")
     canonical = np.sort(segments, axis=1)
-    if len(np.unique(canonical, axis=0)) != len(segments):
+    order = np.lexsort((canonical[:, 1], canonical[:, 0]))
+    ordered = canonical[order]
+    if len(segments) > 1 and np.any(
+        np.all(ordered[1:] == ordered[:-1], axis=1)
+    ):
         raise ValueError("duplicate segments are not supported")
     return segments
 
@@ -201,15 +212,14 @@ def _run(
     if n < 3:
         return np.empty((0, 3), dtype=np.int32)
     capacity = 4 * n + 16
-    triangles = np.empty((capacity, 3), dtype=np.int64)
-    marks = np.empty(capacity, dtype=np.float64)
-    edge_a = np.empty(3 * capacity, dtype=np.int64)
-    edge_b = np.empty(3 * capacity, dtype=np.int64)
-    coefficients = np.empty((4, capacity), dtype=np.float64)
-    segment_buffer = (
-        segments if len(segments) else np.empty((1, 2), dtype=np.int64)
-    )
-    hole_buffer = holes if len(holes) else np.empty((1, 2), dtype=np.float64)
+    workspace = np.empty(14 * capacity, dtype=np.int64)
+    triangles = workspace[: 3 * capacity].reshape(capacity, 3)
+    marks = workspace[3 * capacity : 4 * capacity].view(np.float64)
+    edge_a = workspace[4 * capacity : 7 * capacity]
+    edge_b = workspace[7 * capacity : 10 * capacity]
+    coefficients = workspace[10 * capacity :].view(np.float64).reshape(4, capacity)
+    segment_buffer = segments if len(segments) else _SEGMENT_SENTINEL
+    hole_buffer = holes if len(holes) else _HOLE_SENTINEL
     count = int(
         lib().mt_triangulate(
             addr(vertices, np.dtype(np.float64), 2 * n, "vertices"),
@@ -258,8 +268,8 @@ def delaunay(pts) -> np.ndarray:
     vertices = _points(pts, "pts")
     return _run(
         vertices,
-        np.empty((0, 2), dtype=np.int64),
-        np.empty((0, 2), dtype=np.float64),
+        _EMPTY_SEGMENTS,
+        _EMPTY_HOLES,
         False,
     )
 
@@ -280,21 +290,21 @@ def triangulate(tri: Mapping, opts: str = "") -> dict[str, np.ndarray]:
     vertices = _points(tri["vertices"])
     pslg = "p" in flags
     requested_segments = _segments(
-        tri.get("segments", np.empty((0, 2), dtype=np.int64)), len(vertices)
+        tri.get("segments", _EMPTY_SEGMENTS), len(vertices)
     )
-    segments = requested_segments if pslg else np.empty((0, 2), dtype=np.int64)
+    segments = requested_segments if pslg else _EMPTY_SEGMENTS
     if pslg:
         _validate_pslg(vertices, segments)
-    holes = _points(tri.get("holes", np.empty((0, 2))), "holes")
+    holes = _points(tri.get("holes", _EMPTY_HOLES), "holes")
     if not pslg:
-        holes = np.empty((0, 2), dtype=np.float64)
+        holes = _EMPTY_HOLES
 
     if "c" in flags:
         hull = _hull_from_triangles(
             _run(
                 vertices,
-                np.empty((0, 2), dtype=np.int64),
-                np.empty((0, 2), dtype=np.float64),
+                _EMPTY_SEGMENTS,
+                _EMPTY_HOLES,
                 False,
             )
         ).astype(np.int64)
