@@ -125,10 +125,10 @@ def mark_cavity(
     var t = 0
     var nbad = 0
     while t + W <= nt:
-        var orientation = coefficients.load[width=W](t)
-        var linear_x = coefficients.load[width=W](capacity + t)
-        var linear_y = coefficients.load[width=W](2 * capacity + t)
-        var constant = coefficients.load[width=W](3 * capacity + t)
+        var orientation = coefficients.unsafe_load[width=W](t)
+        var linear_x = coefficients.unsafe_load[width=W](capacity + t)
+        var linear_y = coefficients.unsafe_load[width=W](2 * capacity + t)
+        var constant = coefficients.unsafe_load[width=W](3 * capacity + t)
         var values = (
             constant + linear_x * dx + linear_y * dy - orientation * squared
         )
